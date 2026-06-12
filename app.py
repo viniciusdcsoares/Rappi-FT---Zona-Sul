@@ -31,20 +31,46 @@ DATA_DIR       = Path(__file__).parent / "data"
 ALLOWED_DOMAIN = "@rappi.com"
 SUPPORTED_EXTS = {".xlsx", ".xls", ".docx"}
 
-# ── Arquivo remoto: Consolidação de Integrações (Google Sheets) ───────────────
-# O arquivo .xlsx de 37MB não fica no repositório; é lido direto do Google Sheets.
-# Para funcionar, a planilha precisa ser compartilhada como "Qualquer pessoa com o link".
-_CONSOLIDACAO_FILENAME = "Consolidação de Integrações Zona Sul.xlsx"
-_GSHEET_ID             = "17TRmff2LDP2b5S8_qGKITE31bUN153uo"
-# CSV export por aba — muito mais rápido que XLSX para leitura remota
-_CONSOLIDACAO_CSV_URL  = (
-    f"https://docs.google.com/spreadsheets/d/{_GSHEET_ID}"
-    "/export?format=csv&sheet=Base+de+Integra%C3%A7%C3%B5es"
-)
-# XLSX export (usado para obter os nomes de todas as abas e abas secundárias)
-_CONSOLIDACAO_XLSX_URL = (
-    f"https://docs.google.com/spreadsheets/d/{_GSHEET_ID}/export?format=xlsx"
-)
+# ── Arquivos remotos (Google Drive/Sheets) ────────────────────────────────────
+# Agora todos os arquivos ficam hospedados no Google Drive/Sheets.
+# Os IDs dos arquivos ficam armazenados de forma segura em st.secrets["files"]
+REMOTE_FILES = [
+    {
+        "name": "Diagnóstico de KPIs e Plano de Atuação por Loja.docx",
+        "key": "doc_diagnostico",
+        "type": "docx"
+    },
+    {
+        "name": "Consolidação de Integrações Zona Sul.xlsx",
+        "key": "sheet_consolidacao",
+        "type": "xlsx"
+    },
+    {
+        "name": "Stockout por Níveis de Granularidade.xlsx",
+        "key": "sheet_stockout",
+        "type": "xlsx"
+    },
+    {
+        "name": "KPIs das Lojas.xlsx",
+        "key": "sheet_kpis",
+        "type": "xlsx"
+    }
+]
+
+import urllib.parse
+
+def _get_gsheet_csv_url(file_key: str, sheet: str) -> str:
+    sheet_id = st.secrets["files"][file_key]
+    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&sheet={urllib.parse.quote(sheet)}"
+
+def _get_gsheet_xlsx_url(file_key: str) -> str:
+    sheet_id = st.secrets["files"][file_key]
+    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
+
+def _get_gdoc_export_url(file_key: str) -> str:
+    doc_id = st.secrets["files"][file_key]
+    return f"https://docs.google.com/document/d/{doc_id}/export?format=docx"
+
 
 # Google OAuth endpoints
 _AUTH_URI     = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -239,9 +265,9 @@ def _build_auth_url() -> str:
         "scope":         _SCOPES,
         "access_type":   "online",
         "prompt":        "select_account",
+        "hd":            "rappi.com",  # Força o Google a pedir a conta da Rappi
     }
-    return _AUTH_URI + "?" + urlencode(params)
-
+    return f"{_AUTH_URI}?{urllib.parse.urlencode(params)}"
 
 def _exchange_code(code: str) -> dict:
     """Troca o authorization code por um access token."""
@@ -418,26 +444,22 @@ def human_size(size_bytes: int) -> str:
 
 
 def list_data_files() -> list:
-    if not DATA_DIR.exists():
-        local_files = []
-    else:
-        local_files = [f for f in DATA_DIR.iterdir() if f.suffix.lower() in SUPPORTED_EXTS]
-
-    # Adiciona entrada virtual para o arquivo remoto (não existe em disco)
-    remote_virtual = DATA_DIR / _CONSOLIDACAO_FILENAME
-    if not any(f.name == _CONSOLIDACAO_FILENAME for f in local_files):
-        local_files.append(remote_virtual)
-
+    """Retorna uma lista de objetos Path virtuais baseados nos arquivos remotos."""
+    virtual_dir = Path("remote_data")
+    files = [virtual_dir / f["name"] for f in REMOTE_FILES]
     # DOCX primeiro (0), depois outros (1). Alfabético dentro.
     return sorted(
-        local_files,
+        files,
         key=lambda f: (0 if f.suffix.lower() == ".docx" else 1, f.name.lower())
     )
 
 
 def _is_remote_file(file_path: Path) -> bool:
-    """Retorna True se o arquivo não existe em disco (é remoto)."""
-    return not file_path.exists()
+    """Todos os arquivos agora são remotos."""
+    return True
+
+def _get_remote_file_config(file_name: str) -> dict:
+    return next((f for f in REMOTE_FILES if f["name"] == file_name), None)
 
 
 # ── Leituras cacheadas ─────────────────────────────────────────────────────────
@@ -445,14 +467,16 @@ def _is_remote_file(file_path: Path) -> bool:
 @st.cache_data(show_spinner=False)
 def _load_integracoes_sample() -> pd.DataFrame:
     """Lê as 1.000 primeiras linhas via CSV (rápido, sem baixar o XLSX inteiro)."""
-    return pd.read_csv(_CONSOLIDACAO_CSV_URL, nrows=1000)
+    url = _get_gsheet_csv_url("sheet_consolidacao", "Base de Integrações")
+    return pd.read_csv(url, nrows=1000)
 
 
 @st.cache_data(show_spinner=False)
 def _load_integracoes_filter_values() -> dict:
     """Lê apenas as 4 colunas de filtro via CSV para popular os selects."""
     FILTER_COLS = ["ID da Loja", "PRODUCT_ID", "SKU (ID)", "EAN"]
-    df = pd.read_csv(_CONSOLIDACAO_CSV_URL, usecols=lambda c: c in FILTER_COLS)
+    url = _get_gsheet_csv_url("sheet_consolidacao", "Base de Integrações")
+    df = pd.read_csv(url, usecols=lambda c: c in FILTER_COLS)
     return {
         col: sorted(df[col].dropna().astype(str).unique().tolist())
         for col in FILTER_COLS
@@ -463,51 +487,60 @@ def _load_integracoes_filter_values() -> dict:
 @st.cache_data(show_spinner=False)
 def _load_integracoes_filtered(col: str, value: str) -> pd.DataFrame:
     """Carrega o CSV completo e aplica o filtro. Resultado fica em cache."""
-    df = pd.read_csv(_CONSOLIDACAO_CSV_URL)
+    url = _get_gsheet_csv_url("sheet_consolidacao", "Base de Integrações")
+    df = pd.read_csv(url)
     return df[df[col].astype(str) == value]
 
 
 @st.cache_data(show_spinner=False)
-def _load_sheet_generic(file_path_str: str, sheet: str) -> pd.DataFrame:
-    return pd.read_excel(file_path_str, sheet_name=sheet, engine="openpyxl")
+def _load_sheet_generic(xlsx_url: str, sheet: str) -> pd.DataFrame:
+    return pd.read_excel(xlsx_url, sheet_name=sheet, engine="openpyxl")
 
 
 @st.cache_data(show_spinner=False)
-def _load_sheet_kpis_found_rate(file_path_str: str) -> pd.DataFrame:
-    df = pd.read_excel(file_path_str, sheet_name="Found Rate", usecols="A:J", engine="openpyxl")
+def _load_sheet_kpis_found_rate(xlsx_url: str) -> pd.DataFrame:
+    df = pd.read_excel(xlsx_url, sheet_name="Found Rate", usecols="A:J", engine="openpyxl")
     if "TOTAL_ORDERS" in df.columns:
         df = df[df["TOTAL_ORDERS"].notna()]
         df = df[df["TOTAL_ORDERS"].astype(str).str.strip() != "#N/A"]
     return df
 
 
+@st.cache_data(show_spinner=False)
+def _get_remote_sheet_names(xlsx_url: str) -> list:
+    """Baixa o XLSX e retorna a lista de abas."""
+    xls = pd.ExcelFile(xlsx_url, engine="openpyxl")
+    return xls.sheet_names
+
+
 def render_xlsx(file_path: Path):
-    is_remote = _is_remote_file(file_path)
-    is_consolidacao = file_path.name == _CONSOLIDACAO_FILENAME
+    file_cfg = _get_remote_file_config(file_path.name)
+    if not file_cfg:
+        st.error("Arquivo não configurado.")
+        return
+
+    is_consolidacao = file_cfg["key"] == "sheet_consolidacao"
+    xlsx_url = _get_gsheet_xlsx_url(file_cfg["key"])
 
     try:
         if is_consolidacao:
-            # Para o arquivo remoto, as abas são conhecidas (evita baixar XLSX só para metadados)
             sheet_names = ["Base de Integrações"]
         else:
-            import openpyxl
-            wb_meta = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
-            sheet_names = wb_meta.sheetnames
-            wb_meta.close()
+            with st.spinner("Lendo metadados da planilha..."):
+                sheet_names = _get_remote_sheet_names(xlsx_url)
 
         if not sheet_names:
             st.warning("⚠️ A planilha não contém nenhuma aba.")
             return
 
         tabs = st.tabs([f"📋 {s}" for s in sheet_names])
-        fp_str = str(file_path)
         FILTER_COLS = ["ID da Loja", "PRODUCT_ID", "SKU (ID)", "EAN"]
 
         for tab, sheet in zip(tabs, sheet_names):
             with tab:
                 try:
                     is_kpis_found_rate = (
-                        file_path.name.lower() == "kpis das lojas.xlsx"
+                        file_cfg["key"] == "sheet_kpis"
                         and sheet == "Found Rate"
                     )
                     is_integracoes_base = (
@@ -515,7 +548,7 @@ def render_xlsx(file_path: Path):
                     )
 
                     if is_kpis_found_rate:
-                        df = _load_sheet_kpis_found_rate(fp_str)
+                        df = _load_sheet_kpis_found_rate(xlsx_url)
 
                     elif is_integracoes_base:
                         st.markdown(
@@ -558,7 +591,7 @@ def render_xlsx(file_path: Path):
                             st.info("⚡ Amostra: primeiras 1.000 linhas. Use os filtros acima para buscar na base completa.")
 
                     else:
-                        df = _load_sheet_generic(fp_str, sheet)
+                        df = _load_sheet_generic(xlsx_url, sheet)
 
                     if df.empty:
                         st.info(f"A aba **{sheet}** está vazia.")
@@ -574,8 +607,20 @@ def render_xlsx(file_path: Path):
 def render_docx(file_path: Path):
     """Converte DOCX → HTML via mammoth (preserva tabelas, imagens, formatação)."""
     try:
-        with open(file_path, "rb") as f:
-            result = mammoth.convert_to_html(f)
+        file_cfg = _get_remote_file_config(file_path.name)
+        if not file_cfg:
+            st.error("Arquivo não configurado.")
+            return
+
+        url = _get_gdoc_export_url(file_cfg["key"])
+        
+        with st.spinner("Baixando documento..."):
+            resp = requests.get(url, timeout=15)
+            resp.raise_for_status()
+            import io
+            doc_file = io.BytesIO(resp.content)
+
+        result = mammoth.convert_to_html(doc_file)
 
         html_body = result.value
         if not html_body.strip():
@@ -675,17 +720,29 @@ with st.sidebar:
             "letter-spacing:0.08em; margin-bottom:0.5rem;'>ARQUIVOS DISPONÍVEIS</p>",
             unsafe_allow_html=True,
         )
+        if "selected_file_idx" not in st.session_state:
+            st.session_state.selected_file_idx = 0
+            
         file_names = [f.name for f in data_files]
-        selected_name = st.selectbox(
+        st.selectbox(
             label="Selecione um arquivo",
-            options=file_names,
+            options=range(len(file_names)),
+            format_func=lambda i: file_names[i],
+            key="selected_file_idx",
             label_visibility="collapsed",
         )
-        selected_file = DATA_DIR / selected_name
+        
+        selected_idx = st.session_state.selected_file_idx
+        if selected_idx >= len(data_files):
+            selected_idx = 0
+            st.session_state.selected_file_idx = 0
 
+        selected_file = data_files[selected_idx]
+        selected_name = selected_file.name
         ext  = selected_file.suffix.lower().lstrip(".")
-        size = human_size(selected_file.stat().st_size) if selected_file.exists() else "Google Sheets"
+        size = "Google Drive"
         icon = get_file_icon(ext)
+        
         st.markdown(
             f'<div style="background:#1e1e1e; border:1px solid #2a2a2a;'
             f'border-left:3px solid #FF6B35; border-radius:10px;'
@@ -724,7 +781,7 @@ if not data_files or selected_file is None:
     )
 else:
     ext      = selected_file.suffix.lower()
-    file_sz  = human_size(selected_file.stat().st_size) if selected_file.exists() else "Google Sheets"
+    file_sz  = "Google Drive"
 
     st.markdown(
         f'<div style="display:flex; align-items:center; gap:0.6rem; margin-bottom:1.2rem;">'
@@ -741,4 +798,3 @@ else:
         render_docx(selected_file)
     else:
         st.warning(f"Formato `{ext}` não suportado.")
-
