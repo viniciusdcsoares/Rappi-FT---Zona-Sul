@@ -221,8 +221,10 @@ def _get_redirect_uri() -> str:
     is_cloud = any([
         os.environ.get("STREAMLIT_SHARING_MODE") == "streamlit-cloud",
         os.path.exists("/home/appuser"),
+        os.path.exists("/home/adminuser"),
         os.environ.get("HOME", "").startswith("/home/appuser"),
-        os.environ.get("USER") == "appuser",
+        os.environ.get("HOME", "").startswith("/home/adminuser"),
+        os.environ.get("USER") in ["appuser", "adminuser"],
     ])
     key = "redirect_uri_prod" if is_cloud else "redirect_uri_local"
     return st.secrets["google"][key]
