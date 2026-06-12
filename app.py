@@ -206,14 +206,23 @@ def _get_secret(key: str) -> str:
 
 
 def _get_redirect_uri() -> str:
-    """Retorna localhost em dev, URL de produção no Streamlit Cloud.
-    Usa múltiplos indicadores para detectar o ambiente com segurança.
+    """Detecta o redirect URI a partir do Host real do request HTTP.
+    É a forma mais confiável — independe de variáveis de ambiente.
     """
+    try:
+        # st.context.headers disponível no Streamlit>=1.37.0
+        host = st.context.headers.get("host", "")
+        if host and "localhost" not in host and "127.0.0.1" not in host:
+            return f"https://{host}"
+    except Exception:
+        pass
+
+    # Fallback: detecção por variáveis de ambiente do Streamlit Cloud
     is_cloud = any([
         os.environ.get("STREAMLIT_SHARING_MODE") == "streamlit-cloud",
-        os.path.exists("/home/appuser"),          # container padrão do Streamlit Cloud
+        os.path.exists("/home/appuser"),
         os.environ.get("HOME", "").startswith("/home/appuser"),
-        os.environ.get("USER") == "appuser",      # usuário padrão do Streamlit Cloud
+        os.environ.get("USER") == "appuser",
     ])
     key = "redirect_uri_prod" if is_cloud else "redirect_uri_local"
     return st.secrets["google"][key]
