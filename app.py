@@ -239,8 +239,9 @@ def _build_auth_url() -> str:
         "scope":         _SCOPES,
         "access_type":   "online",
         "prompt":        "select_account",
+        "hd":            "rappi.com",  # Força o Google a pedir a conta da Rappi
     }
-    return _AUTH_URI + "?" + urlencode(params)
+    return f"{_AUTH_URI}?{urllib.parse.urlencode(params)}"
 
 
 def _exchange_code(code: str) -> dict:
@@ -320,6 +321,9 @@ if not st.session_state.get("connected"):
             </a>
             <p style="font-size:0.72rem; color:#444; margin-top:1.5rem;">
               Acesso restrito a colaboradores <strong style="color:#666;">@rappi.com</strong>
+            </p>
+            <p style="font-size:0.65rem; color:#333; margin-top:0.5rem;">
+              Debug URI: {_get_redirect_uri()}
             </p>
           </div>
         </div>
