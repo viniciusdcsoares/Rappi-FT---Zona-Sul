@@ -206,9 +206,15 @@ def _get_secret(key: str) -> str:
 
 
 def _get_redirect_uri() -> str:
-    """Retorna localhost em dev, URL de produção no Streamlit Cloud."""
-    # Streamlit Cloud define STREAMLIT_SHARING_MODE = 'streamlit-cloud'
-    is_cloud = os.environ.get("STREAMLIT_SHARING_MODE") == "streamlit-cloud"
+    """Retorna localhost em dev, URL de produção no Streamlit Cloud.
+    Usa múltiplos indicadores para detectar o ambiente com segurança.
+    """
+    is_cloud = any([
+        os.environ.get("STREAMLIT_SHARING_MODE") == "streamlit-cloud",
+        os.path.exists("/home/appuser"),          # container padrão do Streamlit Cloud
+        os.environ.get("HOME", "").startswith("/home/appuser"),
+        os.environ.get("USER") == "appuser",      # usuário padrão do Streamlit Cloud
+    ])
     key = "redirect_uri_prod" if is_cloud else "redirect_uri_local"
     return st.secrets["google"][key]
 
