@@ -31,6 +31,21 @@ DATA_DIR       = Path(__file__).parent / "data"
 ALLOWED_DOMAIN = "@rappi.com"
 SUPPORTED_EXTS = {".xlsx", ".xls", ".docx"}
 
+# ── Arquivo remoto: Consolidação de Integrações (Google Sheets) ───────────────
+# O arquivo .xlsx de 37MB não fica no repositório; é lido direto do Google Sheets.
+# Para funcionar, a planilha precisa ser compartilhada como "Qualquer pessoa com o link".
+_CONSOLIDACAO_FILENAME = "Consolidação de Integrações Zona Sul.xlsx"
+_GSHEET_ID             = "17TRmff2LDP2b5S8_qGKITE31bUN153uo"
+# CSV export por aba — muito mais rápido que XLSX para leitura remota
+_CONSOLIDACAO_CSV_URL  = (
+    f"https://docs.google.com/spreadsheets/d/{_GSHEET_ID}"
+    "/export?format=csv&sheet=Base+de+Integra%C3%A7%C3%B5es"
+)
+# XLSX export (usado para obter os nomes de todas as abas e abas secundárias)
+_CONSOLIDACAO_XLSX_URL = (
+    f"https://docs.google.com/spreadsheets/d/{_GSHEET_ID}/export?format=xlsx"
+)
+
 # Google OAuth endpoints
 _AUTH_URI     = "https://accounts.google.com/o/oauth2/v2/auth"
 _TOKEN_URI    = "https://oauth2.googleapis.com/token"
@@ -384,37 +399,51 @@ def human_size(size_bytes: int) -> str:
 
 def list_data_files() -> list:
     if not DATA_DIR.exists():
-        return []
-    files = [f for f in DATA_DIR.iterdir() if f.suffix.lower() in SUPPORTED_EXTS]
-    # DOCX first (0), then other formats (1). Alphabetical sort within.
+        local_files = []
+    else:
+        local_files = [f for f in DATA_DIR.iterdir() if f.suffix.lower() in SUPPORTED_EXTS]
+
+    # Adiciona entrada virtual para o arquivo remoto (não existe em disco)
+    remote_virtual = DATA_DIR / _CONSOLIDACAO_FILENAME
+    if not any(f.name == _CONSOLIDACAO_FILENAME for f in local_files):
+        local_files.append(remote_virtual)
+
+    # DOCX primeiro (0), depois outros (1). Alfabético dentro.
     return sorted(
-        files,
+        local_files,
         key=lambda f: (0 if f.suffix.lower() == ".docx" else 1, f.name.lower())
     )
+
+
+def _is_remote_file(file_path: Path) -> bool:
+    """Retorna True se o arquivo não existe em disco (é remoto)."""
+    return not file_path.exists()
 
 
 # ── Leituras cacheadas ─────────────────────────────────────────────────────────
 
 @st.cache_data(show_spinner=False)
-def _load_integracoes_sample(file_path_str: str) -> pd.DataFrame:
-    """Carrega apenas as 1.000 primeiras linhas da aba 'Base de Integrações'."""
-    return pd.read_excel(file_path_str, sheet_name="Base de Integrações",
-                         nrows=1000, engine="openpyxl")
+def _load_integracoes_sample() -> pd.DataFrame:
+    """Lê as 1.000 primeiras linhas via CSV (rápido, sem baixar o XLSX inteiro)."""
+    return pd.read_csv(_CONSOLIDACAO_CSV_URL, nrows=1000)
 
 
 @st.cache_data(show_spinner=False)
-def _load_integracoes_filter_values(file_path_str: str) -> dict:
-    """Lê apenas as colunas de filtro do arquivo inteiro para popular os selects."""
+def _load_integracoes_filter_values() -> dict:
+    """Lê apenas as 4 colunas de filtro via CSV para popular os selects."""
     FILTER_COLS = ["ID da Loja", "PRODUCT_ID", "SKU (ID)", "EAN"]
-    df = pd.read_excel(file_path_str, sheet_name="Base de Integrações",
-                       usecols=FILTER_COLS, engine="openpyxl")
-    return {col: sorted(df[col].dropna().astype(str).unique().tolist()) for col in FILTER_COLS if col in df.columns}
+    df = pd.read_csv(_CONSOLIDACAO_CSV_URL, usecols=lambda c: c in FILTER_COLS)
+    return {
+        col: sorted(df[col].dropna().astype(str).unique().tolist())
+        for col in FILTER_COLS
+        if col in df.columns
+    }
 
 
 @st.cache_data(show_spinner=False)
-def _load_integracoes_filtered(file_path_str: str, col: str, value: str) -> pd.DataFrame:
-    """Carrega a base completa e aplica filtro na coluna/valor selecionado."""
-    df = pd.read_excel(file_path_str, sheet_name="Base de Integrações", engine="openpyxl")
+def _load_integracoes_filtered(col: str, value: str) -> pd.DataFrame:
+    """Carrega o CSV completo e aplica o filtro. Resultado fica em cache."""
+    df = pd.read_csv(_CONSOLIDACAO_CSV_URL)
     return df[df[col].astype(str) == value]
 
 
@@ -433,21 +462,25 @@ def _load_sheet_kpis_found_rate(file_path_str: str) -> pd.DataFrame:
 
 
 def render_xlsx(file_path: Path):
+    is_remote = _is_remote_file(file_path)
+    is_consolidacao = file_path.name == _CONSOLIDACAO_FILENAME
+
     try:
-        # ── Obter sheet names sem carregar o arquivo inteiro ──────────────────
-        # Para o arquivo grande, evitamos criar pd.ExcelFile (que indexa tudo).
-        # Usamos openpyxl read_only para pegar só os nomes das abas.
-        import openpyxl
-        wb_meta = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
-        sheet_names = wb_meta.sheetnames
-        wb_meta.close()
+        if is_consolidacao:
+            # Para o arquivo remoto, as abas são conhecidas (evita baixar XLSX só para metadados)
+            sheet_names = ["Base de Integrações"]
+        else:
+            import openpyxl
+            wb_meta = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+            sheet_names = wb_meta.sheetnames
+            wb_meta.close()
 
         if not sheet_names:
             st.warning("⚠️ A planilha não contém nenhuma aba.")
             return
 
         tabs = st.tabs([f"📋 {s}" for s in sheet_names])
-        fp_str = str(file_path)  # cache_data requer tipos serializáveis
+        fp_str = str(file_path)
         FILTER_COLS = ["ID da Loja", "PRODUCT_ID", "SKU (ID)", "EAN"]
 
         for tab, sheet in zip(tabs, sheet_names):
@@ -458,17 +491,15 @@ def render_xlsx(file_path: Path):
                         and sheet == "Found Rate"
                     )
                     is_integracoes_base = (
-                        file_path.name.lower() == "consolidação de integrações zona sul.xlsx"
-                        and sheet == "Base de Integrações"
+                        is_consolidacao and sheet == "Base de Integrações"
                     )
 
                     if is_kpis_found_rate:
                         df = _load_sheet_kpis_found_rate(fp_str)
 
                     elif is_integracoes_base:
-                        # ── Filtros por coluna ────────────────────────────────────
                         st.markdown(
-                            "<p style='font-size:0.82rem;color:#888;margin-bottom:0.3rem;'>" 
+                            "<p style='font-size:0.82rem;color:#888;margin-bottom:0.3rem;'>"
                             "🔍 <strong>Filtrar base</strong> — escolha uma coluna e um valor "
                             "para carregar os dados filtrados. Sem filtro: exibe amostra de 1.000 linhas.</p>",
                             unsafe_allow_html=True,
@@ -484,7 +515,7 @@ def render_xlsx(file_path: Path):
                             )
                         if filtro_col:
                             with st.spinner("Carregando valores únicos..."):
-                                filter_vals = _load_integracoes_filter_values(fp_str)
+                                filter_vals = _load_integracoes_filter_values()
                             valores = filter_vals.get(filtro_col, [])
                             with c2:
                                 filtro_val = st.selectbox(
@@ -499,11 +530,11 @@ def render_xlsx(file_path: Path):
 
                         if filtro_col and filtro_val:
                             with st.spinner(f"Filtrando por {filtro_col} = {filtro_val}..."):
-                                df = _load_integracoes_filtered(fp_str, filtro_col, filtro_val)
+                                df = _load_integracoes_filtered(filtro_col, filtro_val)
                             st.success(f"✅ {len(df):,} linhas com **{filtro_col}** = `{filtro_val}`")
                         else:
                             with st.spinner("Carregando amostra..."):
-                                df = _load_integracoes_sample(fp_str)
+                                df = _load_integracoes_sample()
                             st.info("⚡ Amostra: primeiras 1.000 linhas. Use os filtros acima para buscar na base completa.")
 
                     else:
@@ -633,7 +664,7 @@ with st.sidebar:
         selected_file = DATA_DIR / selected_name
 
         ext  = selected_file.suffix.lower().lstrip(".")
-        size = human_size(selected_file.stat().st_size)
+        size = human_size(selected_file.stat().st_size) if selected_file.exists() else "Google Sheets"
         icon = get_file_icon(ext)
         st.markdown(
             f'<div style="background:#1e1e1e; border:1px solid #2a2a2a;'
@@ -673,7 +704,7 @@ if not data_files or selected_file is None:
     )
 else:
     ext      = selected_file.suffix.lower()
-    file_sz  = human_size(selected_file.stat().st_size)
+    file_sz  = human_size(selected_file.stat().st_size) if selected_file.exists() else "Google Sheets"
 
     st.markdown(
         f'<div style="display:flex; align-items:center; gap:0.6rem; margin-bottom:1.2rem;">'
