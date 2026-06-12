@@ -265,7 +265,6 @@ def _build_auth_url() -> str:
         "scope":         _SCOPES,
         "access_type":   "online",
         "prompt":        "select_account",
-        "hd":            "rappi.com",  # Força o Google a pedir a conta da Rappi
     }
     return f"{_AUTH_URI}?{urllib.parse.urlencode(params)}"
 
